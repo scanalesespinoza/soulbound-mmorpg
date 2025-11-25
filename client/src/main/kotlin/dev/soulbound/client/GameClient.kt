@@ -30,11 +30,12 @@ import com.jme3.scene.shape.Quad
 import com.jme3.system.AppSettings
 import com.jme3.audio.AudioNode
 import com.jme3.audio.AudioSource
+import dev.soulbound.client.net.NetworkClient
+import dev.soulbound.client.state.ClientEnemyState
+import dev.soulbound.client.state.ClientGameState
+import dev.soulbound.client.state.ClientPlayerState
 import kotlin.math.max
-import org.java_websocket.client.WebSocketClient
-import org.java_websocket.handshake.ServerHandshake
 import java.net.URI
-import java.util.concurrent.ConcurrentLinkedQueue
 
 data class WsMessage(val type: String, val data: Any?)
 data class MonsterPayload(
@@ -82,9 +83,9 @@ data class Notification(var text: String, var ttl: Float)
 
 class GameClientApp(private val playerName: String) : SimpleApplication() {
     private val mapper = jacksonObjectMapper()
-    private val inbox = ConcurrentLinkedQueue<WsMessage>()
+    private val gameState = ClientGameState()
+    private lateinit var netClient: NetworkClient
     private lateinit var statusText: BitmapText
-    private lateinit var wsClient: WebSocketClient
     private lateinit var chaseCam: ChaseCamera
     private lateinit var playerNode: Node
     private lateinit var playerBody: Geometry
@@ -140,6 +141,7 @@ class GameClientApp(private val playerName: String) : SimpleApplication() {
     private val monsterRoot = Node("monsters")
     private var level = 1
     private var xp = 0
+    private var nextLevelXp = 100
 
     private fun setupAudio() {
         walkSound = loadSound("Sound/Effects/Footsteps.ogg", looping = true, volume = 0.4f)
@@ -195,46 +197,18 @@ class GameClientApp(private val playerName: String) : SimpleApplication() {
         chaseCam.setTrailingEnabled(true)
 
         val uri = URI.create("ws://localhost:8080/ws")
-        wsClient = object : WebSocketClient(uri) {
-            override fun onOpen(handshakedata: ServerHandshake?) {
-                send(mapper.writeValueAsString(mapOf("type" to "join", "data" to playerName)))
-            }
-
-            override fun onMessage(message: String?) {
-                if (message == null) return
-                try {
-                    val map: Map<String, Any?> = mapper.readValue(message)
-                    val type = map["type"] as? String ?: return
-                    val data = map["data"]
-                    inbox.add(WsMessage(type, data))
-                } catch (e: Exception) {
-                    println("Failed to parse: $message")
-                }
-            }
-
-            override fun onClose(code: Int, reason: String?, remote: Boolean) {}
-            override fun onError(ex: Exception?) { ex?.printStackTrace() }
-        }
-        wsClient.connect()
+        netClient = NetworkClient(uri)
+        netClient.connect(playerName)
     }
 
     override fun simpleUpdate(tpf: Float) {
         while (true) {
-            val msg = inbox.poll() ?: break
+            val msg = netClient.inbox.poll() ?: break
             when (msg.type) {
                 "join_ack" -> {
                     val data = msg.data ?: continue
                     val player = mapper.convertValue<PlayerPayload>(data)
-                    level = player.level
-                    xp = player.xp
-                    player.x?.let { playerNode.localTranslation = playerNode.localTranslation.setX(it) }
-                    player.z?.let { playerNode.localTranslation = playerNode.localTranslation.setZ(it) }
-                    player.hp?.let { hp = it.toFloat() }
-                    player.maxHp?.let { maxHp = it.toFloat() }
-                    player.attack?.let { swordDamageValue = it }
-                    player.spawnX?.let { spawnX = it }
-                    player.spawnZ?.let { spawnZ = it }
-                    player.dead?.let { dead = it }
+                    applyPlayerPayload(player)
                 }
                 "monster_spawn" -> {
                     val data = msg.data ?: continue
@@ -257,17 +231,9 @@ class GameClientApp(private val playerName: String) : SimpleApplication() {
                     if (id != null) removeMonster(id)
                 }
                 "player_update" -> {
-            val data = msg.data ?: continue
-                    val p = mapper.convertValue<Map<String, Any?>>(data)
-                    val oldHp = hp
-                    level = (p["level"] as? Int) ?: level
-                    xp = (p["xp"] as? Int) ?: xp
-                    hp = (p["hp"] as? Number)?.toFloat() ?: hp
-                    maxHp = (p["maxHp"] as? Number)?.toFloat() ?: maxHp
-                    dead = (p["dead"] as? Boolean) ?: dead
-                    spawnX = (p["spawnX"] as? Number)?.toFloat() ?: spawnX
-                    spawnZ = (p["spawnZ"] as? Number)?.toFloat() ?: spawnZ
-                    if (hp < oldHp) hitFlashTimer = 0.4f
+                    val data = msg.data ?: continue
+                    val player = mapper.convertValue<PlayerPayload>(data)
+                    applyPlayerPayload(player)
                 }
             }
         }
@@ -282,6 +248,40 @@ class GameClientApp(private val playerName: String) : SimpleApplication() {
         val monstersLine = monsters.values.joinToString(", ") { "${it.name}#${it.id}(hp=${it.hp})" }
         statusText.text = "Jugador: $playerName  Nivel: $level  XP: $xp\nMonstruos: $monstersLine"
         updateOverlays(tpf)
+    }
+
+    private fun applyPlayerPayload(player: PlayerPayload) {
+        level = player.level
+        xp = player.xp
+        player.nextLevelXp?.let { nextLevelXp = it }
+        player.x?.let { playerNode.localTranslation = playerNode.localTranslation.setX(it) }
+        player.z?.let { playerNode.localTranslation = playerNode.localTranslation.setZ(it) }
+        player.hp?.let { hp = it.toFloat() }
+        player.maxHp?.let { maxHp = it.toFloat() }
+        player.attack?.let { swordDamageValue = it }
+        player.spawnX?.let { spawnX = it }
+        player.spawnZ?.let { spawnZ = it }
+        player.dead?.let { dead = it }
+        gameState.updatePlayer(
+            ClientPlayerState(
+                id = player.id ?: gameState.player.id,
+                name = player.name ?: gameState.player.name,
+                level = level,
+                xp = xp,
+                nextLevelXp = nextLevelXp,
+                hp = hp.toInt(),
+                maxHp = maxHp.toInt(),
+                attack = swordDamageValue,
+                defense = player.defense ?: gameState.player.defense,
+                moveSpeed = player.moveSpeed ?: gameState.player.moveSpeed,
+                x = playerNode.localTranslation.x,
+                z = playerNode.localTranslation.z,
+                spawnX = spawnX,
+                spawnZ = spawnZ,
+                mapId = player.mapId ?: "default",
+                dead = dead
+            )
+        )
     }
 
     private fun updateMovement(tpf: Float) {
@@ -461,9 +461,8 @@ class GameClientApp(private val playerName: String) : SimpleApplication() {
         val pos = playerNode.worldTranslation
         val moved = pos.distance(lastSentPos) > 0.1f
         if (moved || timeSincePosSent > 0.4f) {
-            if (wsClient.isOpen) {
-                val payload = mapOf("type" to "pos", "data" to mapOf("x" to pos.x, "z" to pos.z))
-                wsClient.send(mapper.writeValueAsString(payload))
+            if (netClient.isOpen()) {
+                netClient.sendPosition(pos.x, pos.z)
             }
             lastSentPos = pos.clone()
             timeSincePosSent = 0f
@@ -682,7 +681,7 @@ class GameClientApp(private val playerName: String) : SimpleApplication() {
         val headWorld = playerHeadNode.worldTranslation.clone().addLocal(0f, 0.5f, 0f)
         val headScreen = cam.getScreenCoordinates(headWorld)
         val pos = playerNode.localTranslation
-        playerPosText.text = "x=%.1f z=%.1f".format(pos.x, pos.z)
+        playerPosText.text = "x=%.1f z=%.1f (XP %d/%d)".format(pos.x, pos.z, xp, nextLevelXp)
         playerPosText.localTranslation = Vector3f(headScreen.x - playerPosText.lineWidth / 2, headScreen.y + 25f, 0f)
 
         val swordWorld = swordNode.worldTranslation.clone().addLocal(0f, 0.3f, 0f)
@@ -718,10 +717,7 @@ class GameClientApp(private val playerName: String) : SimpleApplication() {
             "attack" -> if (isPressed) {
                 if (attackCooldownTimer > 0f) return@ActionListener
                 val facing = facingDir.normalize()
-                if (wsClient.isOpen) {
-                    val payload = mapOf("type" to "attack", "data" to mapOf("fx" to facing.x, "fz" to facing.z))
-                    wsClient.send(mapper.writeValueAsString(payload))
-                }
+                netClient.sendAttack(facing.x, facing.z, null)
                 attackTimer = swordSwingDuration
                 attackCooldownTimer = swordSwingDuration + attackCooldownDuration
             }
@@ -747,6 +743,16 @@ class GameClientApp(private val playerName: String) : SimpleApplication() {
         monsterRoot.attachChild(geom)
         val maxHp = payload.maxHp ?: 40
         monsters[payload.id] = MonsterState(payload.id, payload.hp, maxHp, payload.name, geom, payload.x, payload.z)
+        gameState.upsertEnemy(
+            ClientEnemyState(
+                id = payload.id,
+                name = payload.name,
+                hp = payload.hp,
+                maxHp = maxHp,
+                x = payload.x,
+                z = payload.z
+            )
+        )
     }
 
     private fun updateMonster(payload: MonsterPayload) {
@@ -757,6 +763,17 @@ class GameClientApp(private val playerName: String) : SimpleApplication() {
             it.targetX = payload.x
             it.targetZ = payload.z
         }
+        val maxHp = payload.maxHp ?: monsters[payload.id]?.maxHp ?: 40
+        gameState.upsertEnemy(
+            ClientEnemyState(
+                id = payload.id,
+                name = payload.name,
+                hp = payload.hp,
+                maxHp = maxHp,
+                x = payload.x,
+                z = payload.z
+            )
+        )
     }
 
     private fun removeMonster(id: Int) {
@@ -764,6 +781,7 @@ class GameClientApp(private val playerName: String) : SimpleApplication() {
             monsterRoot.detachChild(it.geom)
         }
         monsters.remove(id)
+        gameState.removeEnemy(id)
     }
 
     private fun updateMonsterColor(state: MonsterState) {
