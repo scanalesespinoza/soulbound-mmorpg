@@ -1,11 +1,12 @@
 package dev.soulbound.server.domain.player
 
+import dev.soulbound.server.domain.world.MapId
 import dev.soulbound.server.domain.world.Position
 
 data class Player(
     val id: PlayerId,
     val name: String,
-    val mapId: String = "default",
+    val mapId: MapId = MapId("default"),
     val position: Position = Position(),
     val spawnPosition: Position = Position(),
     val level: Int = 1,

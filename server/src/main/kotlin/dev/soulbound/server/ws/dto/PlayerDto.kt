@@ -36,7 +36,7 @@ data class PlayerDto(
             z = player.position.z,
             spawnX = player.spawnPosition.x,
             spawnZ = player.spawnPosition.z,
-            mapId = player.mapId,
+            mapId = player.mapId.value,
             dead = player.isDead()
         )
     }

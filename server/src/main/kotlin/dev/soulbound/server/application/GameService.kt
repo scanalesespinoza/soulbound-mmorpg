@@ -7,6 +7,7 @@ import dev.soulbound.server.domain.player.PlayerId
 import dev.soulbound.server.domain.player.PlayerRepository
 import dev.soulbound.server.domain.player.Stats
 import dev.soulbound.server.domain.world.Position
+import dev.soulbound.server.domain.world.MapId
 import dev.soulbound.server.domain.world.WorldRepository
 import dev.soulbound.server.domain.world.WorldState
 import org.springframework.stereotype.Service
@@ -38,7 +39,8 @@ class GameService(
     private val monsterRepository: MonsterRepository,
     private val worldRepository: WorldRepository,
     private val progressionService: PlayerProgressionService,
-    private val lifeService: PlayerLifeService
+    private val lifeService: PlayerLifeService,
+    private val worldService: WorldService
     ) {
     private val rand = ThreadLocalRandom.current()
     private val monsterIdGen = AtomicInteger(1)
@@ -49,6 +51,7 @@ class GameService(
         val player = Player(
             id = PlayerId(sessionId),
             name = name,
+            mapId = MapId("default"),
             position = Position(0f, 0f),
             spawnPosition = Position(0f, 0f),
             stats = Stats(),
@@ -65,11 +68,13 @@ class GameService(
     }
 
     fun updatePosition(sessionId: String, x: Float, z: Float) {
-        val world = worldRepository.get()
-        playerRepository.findById(PlayerId(sessionId))?.let {
-            if (!it.isDead()) {
-                val newPos = Position(x, z).clamp(world.mapLimit)
-                playerRepository.save(it.withPosition(newPos))
+        playerRepository.findById(PlayerId(sessionId))?.let { player ->
+            if (!player.isDead()) {
+                val newPos = Position(x, z)
+                val clamped = worldService.clampToBounds(player.mapId, newPos)
+                if (worldService.canMoveTo(player.mapId, clamped)) {
+                    playerRepository.save(player.withPosition(clamped))
+                }
             }
         }
     }
@@ -142,7 +147,7 @@ class GameService(
         monsterRepository.findAll().forEach { monster ->
             val moveState = moveStates.computeIfAbsent(monster.id) { newMoveState(world) }
             val nearest = nearestPlayer(monster.x, monster.z, world)
-            val target = if (nearest != null && nearest.second <= world.chaseRadius && !isInSafeZone(nearest.first.position.x, nearest.first.position.z, world)) {
+            val target = if (nearest != null && nearest.second <= world.chaseRadius && !worldService.isInSafeZone(nearest.first.mapId, nearest.first.position)) {
                 moveState.timer = 0.5
                 Pair(nearest.first.position.x, nearest.first.position.z)
             } else {
@@ -172,7 +177,7 @@ class GameService(
                     events.add(GameEvent.MonsterMove(monster))
                 }
                 playerRepository.findAll().forEach { p ->
-                    if (!p.isDead() && !isInSafeZone(p.position.x, p.position.z, world) && distance(monster.x, monster.z, p.position.x, p.position.z) <= world.attackRadius) {
+                    if (!p.isDead() && !worldService.isInSafeZone(p.mapId, p.position) && distance(monster.x, monster.z, p.position.x, p.position.z) <= world.attackRadius) {
                         val dmgResult = lifeService.applyDamage(p.id, monster.attack, p.stats.defense)
                         dmgResult?.let { res ->
                             if (res.died) {
@@ -203,10 +208,12 @@ class GameService(
     }
 
     private fun spawnMonster(world: WorldState): GameEvent? {
-        val (baseX, baseZ) = randomWildPosition(world)
-        val jitterX = rand.nextDouble(-2.0, 2.0).toFloat()
-        val jitterZ = rand.nextDouble(-2.0, 2.0).toFloat()
-        val spawnPos = confineMonsterToWild(baseX + jitterX, baseZ + jitterZ, world)
+        val currentMap = worldService.currentMap()
+        val spawnPoints = currentMap.spawnPoints
+        if (spawnPoints.isEmpty()) return null
+        val chosen = spawnPoints[rand.nextInt(spawnPoints.size)]
+        val pos = worldService.randomSpawnNear(chosen)
+        val spawnPos = confineMonsterToWild(pos.x, pos.z, world)
         val monster = Monster(
             id = monsterIdGen.getAndIncrement(),
             name = "Zombie",
@@ -233,34 +240,35 @@ class GameService(
     }
 
     private fun randomWildPosition(world: WorldState): Pair<Float, Float> {
+        val currentMap = worldService.currentMap()
         val radius = rand.nextDouble(world.wildRadiusMin.toDouble(), world.wildRadiusMax.toDouble()).toFloat()
         val angle = rand.nextDouble(0.0, Math.PI * 2)
         val x = (cos(angle) * radius).toFloat()
         val z = (sin(angle) * radius).toFloat()
-        return Pair(x.coerceIn(-world.mapLimit, world.mapLimit), z.coerceIn(-world.mapLimit, world.mapLimit))
+        val clamped = Position(x, z).clamp(currentMap.limitX, currentMap.limitZ)
+        return Pair(clamped.x, clamped.z)
     }
 
     private fun confineMonsterToWild(x: Float, z: Float, world: WorldState): Pair<Float, Float> {
-        val clampedX = x.coerceIn(-world.mapLimit, world.mapLimit)
-        val clampedZ = z.coerceIn(-world.mapLimit, world.mapLimit)
-        val distToCenter = distance(clampedX, clampedZ, 0f, 0f)
-        return if (distToCenter < world.safeRadius) {
+        val map = worldService.currentMap()
+        val clamped = Position(x, z).clamp(map.limitX, map.limitZ)
+        val distToCenter = distance(clamped.x, clamped.z, 0f, 0f)
+        val safeRadius = world.safeRadius
+        return if (distToCenter < safeRadius) {
             if (distToCenter < 0.001f) {
-                Pair(world.safeRadius, 0f)
+                Pair(safeRadius, 0f)
             } else {
-                val scale = world.safeRadius / distToCenter
-                Pair(clampedX * scale, clampedZ * scale)
+                val scale = safeRadius / distToCenter
+                Pair(clamped.x * scale, clamped.z * scale)
             }
-        } else Pair(clampedX, clampedZ)
+        } else Pair(clamped.x, clamped.z)
     }
-
-    private fun isInSafeZone(x: Float, z: Float, world: WorldState) = distance(x, z, 0f, 0f) <= world.safeRadius
 
     private fun nearestPlayer(x: Float, z: Float, world: WorldState): Pair<Player, Float>? {
         var best: Player? = null
         var bestDist = Float.MAX_VALUE
         playerRepository.findAll().forEach {
-            if (isInSafeZone(it.position.x, it.position.z, world)) return@forEach
+            if (worldService.isInSafeZone(it.mapId, it.position)) return@forEach
             val d = distance(x, z, it.position.x, it.position.z)
             if (d < bestDist) {
                 bestDist = d
