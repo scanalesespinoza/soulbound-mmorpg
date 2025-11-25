@@ -35,6 +35,13 @@ class GameHandler(private val mapper: ObjectMapper) : TextWebSocketHandler() {
     private val chaseRadius = 15f
     private val attackRadius = 1.2f
     private val attackDamage = 8
+    private val safeRadius = 5f
+    private val spawnPoints = listOf(
+        Pair(-15f, 10f),
+        Pair(15f, -12f),
+        Pair(10f, 15f),
+        Pair(-10f, -15f)
+    )
 
     override fun afterConnectionEstablished(session: WebSocketSession) {
         sessions[session.id] = session
@@ -55,9 +62,12 @@ class GameHandler(private val mapper: ObjectMapper) : TextWebSocketHandler() {
                 "join" -> {
                     val name = envelope["data"] as? String ?: "Player"
                     val player = Player(id = session.id, name = name)
+                    player.spawnX = 0f
+                    player.spawnZ = 0f
+                    player.x = player.spawnX
+                    player.z = player.spawnZ
+                    player.hp = player.maxHp
                     players[session.id] = player
-                    player.spawnX = player.x
-                    player.spawnZ = player.z
                     send(session, WsMessage("join_ack", player))
                     // push current monsters so the player sees the world state right away
                     monsters.values.forEach { send(session, WsMessage("monster_spawn", it)) }
@@ -100,13 +110,16 @@ class GameHandler(private val mapper: ObjectMapper) : TextWebSocketHandler() {
                     val px = (data["x"] as? Number)?.toFloat() ?: return
                     val pz = (data["z"] as? Number)?.toFloat() ?: return
                     players[session.id]?.let {
-                        it.x = px
-                        it.z = pz
+                        if (!it.dead) {
+                            it.x = px.coerceIn(-mapLimit, mapLimit)
+                            it.z = pz.coerceIn(-mapLimit, mapLimit)
+                        }
                     }
                 }
                 "respawn" -> {
                     val p = players[session.id] ?: return
-                    p.hp = p.maxHp()
+                    p.dead = false
+                    p.hp = p.maxHp
                     p.x = p.spawnX
                     p.z = p.spawnZ
                     broadcast(WsMessage("player_update", p))
@@ -190,8 +203,14 @@ class GameHandler(private val mapper: ObjectMapper) : TextWebSocketHandler() {
                 // damage nearby players
                 players.values.forEach { p ->
                     if (distance(monster.x, monster.z, p.x, p.z) <= attackRadius) {
-                        p.hp = (p.hp - attackDamage).coerceAtLeast(0)
-                        broadcast(WsMessage("player_update", p))
+                        if (!p.dead) {
+                            p.hp = (p.hp - (monster.attack)).coerceAtLeast(0)
+                            if (p.hp <= 0) {
+                                p.dead = true
+                                broadcast(WsMessage("player_dead", p))
+                            }
+                            broadcast(WsMessage("player_update", p))
+                        }
                     }
                 }
             }
@@ -243,7 +262,10 @@ class GameHandler(private val mapper: ObjectMapper) : TextWebSocketHandler() {
             while (player.xp >= player.nextLevelXp()) {
                 player.xp -= player.nextLevelXp()
                 player.level += 1
-                player.hp = player.maxHp()
+                player.maxHp += 20
+                player.attack += 2
+                player.defense += 1
+                player.hp = player.maxHp
             }
             broadcast(WsMessage("monster_killed", mapOf("id" to monster.id, "by" to player.id)))
             broadcast(WsMessage("player_update", player))
@@ -254,14 +276,22 @@ class GameHandler(private val mapper: ObjectMapper) : TextWebSocketHandler() {
 
     private fun spawnMonster() {
         val rand = ThreadLocalRandom.current()
-        val x = rand.nextDouble(-mapLimit.toDouble(), mapLimit.toDouble()).toFloat()
-        val z = rand.nextDouble(-mapLimit.toDouble(), mapLimit.toDouble()).toFloat()
+        val (sx, sz) = spawnPoints[rand.nextInt(spawnPoints.size)]
+        val x = sx + rand.nextDouble(-2.0, 2.0).toFloat()
+        val z = sz + rand.nextDouble(-2.0, 2.0).toFloat()
         val m = Monster(
             id = monsterIdGen.getAndIncrement(),
             name = "Zombie",
-            hp = 40,
+            hp = 60,
+            maxHp = 60,
+            attack = 10,
+            defense = 3,
+            xpReward = 25,
+            moveSpeed = monsterSpeed,
             x = x,
-            z = z
+            z = z,
+            spawnX = sx,
+            spawnZ = sz
         )
         monsters[m.id] = m
         moveStates[m.id] = newMoveState()

@@ -37,7 +37,20 @@ import java.net.URI
 import java.util.concurrent.ConcurrentLinkedQueue
 
 data class WsMessage(val type: String, val data: Any?)
-data class MonsterPayload(val id: Int, val name: String, val hp: Int, val x: Float, val z: Float)
+data class MonsterPayload(
+    val id: Int,
+    val name: String,
+    val hp: Int,
+    val maxHp: Int? = null,
+    val attack: Int? = null,
+    val defense: Int? = null,
+    val xpReward: Int? = null,
+    val moveSpeed: Float? = null,
+    val spawnX: Float? = null,
+    val spawnZ: Float? = null,
+    val x: Float,
+    val z: Float
+)
 data class PlayerPayload(
     val id: String?,
     val name: String?,
@@ -46,12 +59,18 @@ data class PlayerPayload(
     val x: Float? = null,
     val z: Float? = null,
     val hp: Int? = null,
+    val maxHp: Int? = null,
+    val attack: Int? = null,
+    val defense: Int? = null,
+    val moveSpeed: Float? = null,
+    val dead: Boolean? = null,
     val spawnX: Float? = null,
     val spawnZ: Float? = null
 )
 data class MonsterState(
     val id: Int,
     var hp: Int,
+    var maxHp: Int,
     val name: String,
     val geom: Geometry,
     var targetX: Float,
@@ -80,7 +99,7 @@ class GameClientApp(private val playerName: String) : SimpleApplication() {
     private val moveSpeed = 8f
     private val clickArriveThreshold = 0.2f
     private val floorLimit = 23f
-    private val maxHp = 100f
+    private var maxHp = 100f
     private var hp = maxHp
     private var clickMarker: Geometry? = null
     private var pathLine: Geometry? = null
@@ -97,10 +116,11 @@ class GameClientApp(private val playerName: String) : SimpleApplication() {
     private val swordSwingDuration = 0.3f
     private val attackCooldownDuration = 0.1f
     private var attackCooldownTimer = 0f
-    private val swordDamageValue = 10
+    private var swordDamageValue = 10
     private var spawnX: Float = 0f
     private var spawnZ: Float = 0f
     private var hitFlashTimer = 0f
+    private var dead = false
     private var walkSound: AudioNode? = null
     private var attackSound: AudioNode? = null
     private var hurtSound: AudioNode? = null
@@ -206,8 +226,11 @@ class GameClientApp(private val playerName: String) : SimpleApplication() {
                     player.x?.let { playerNode.localTranslation = playerNode.localTranslation.setX(it) }
                     player.z?.let { playerNode.localTranslation = playerNode.localTranslation.setZ(it) }
                     player.hp?.let { hp = it.toFloat() }
+                    player.maxHp?.let { maxHp = it.toFloat() }
+                    player.attack?.let { swordDamageValue = it }
                     player.spawnX?.let { spawnX = it }
                     player.spawnZ?.let { spawnZ = it }
+                    player.dead?.let { dead = it }
                 }
                 "monster_spawn" -> {
                     val data = msg.data ?: continue
@@ -231,19 +254,23 @@ class GameClientApp(private val playerName: String) : SimpleApplication() {
                 }
                 "player_update" -> {
             val data = msg.data ?: continue
-            val p = mapper.convertValue<Map<String, Any?>>(data)
-            val oldHp = hp
-            level = (p["level"] as? Int) ?: level
-            xp = (p["xp"] as? Int) ?: xp
-            hp = (p["hp"] as? Number)?.toFloat() ?: hp
-            spawnX = (p["spawnX"] as? Number)?.toFloat() ?: spawnX
-            spawnZ = (p["spawnZ"] as? Number)?.toFloat() ?: spawnZ
-            if (hp < oldHp) hitFlashTimer = 0.4f
-        }
-    }
+                    val p = mapper.convertValue<Map<String, Any?>>(data)
+                    val oldHp = hp
+                    level = (p["level"] as? Int) ?: level
+                    xp = (p["xp"] as? Int) ?: xp
+                    hp = (p["hp"] as? Number)?.toFloat() ?: hp
+                    maxHp = (p["maxHp"] as? Number)?.toFloat() ?: maxHp
+                    dead = (p["dead"] as? Boolean) ?: dead
+                    spawnX = (p["spawnX"] as? Number)?.toFloat() ?: spawnX
+                    spawnZ = (p["spawnZ"] as? Number)?.toFloat() ?: spawnZ
+                    if (hp < oldHp) hitFlashTimer = 0.4f
+                }
+            }
         }
         attackCooldownTimer = max(0f, attackCooldownTimer - tpf)
-        updateMovement(tpf)
+        if (!dead) {
+            updateMovement(tpf)
+        }
         applyGravity(tpf)
         playLoopingSounds(tpf)
         smoothMonsters(tpf)
@@ -671,12 +698,14 @@ class GameClientApp(private val playerName: String) : SimpleApplication() {
         geom.material = mat
         geom.localTranslation = Vector3f(payload.x, 0.6f, payload.z)
         monsterRoot.attachChild(geom)
-        monsters[payload.id] = MonsterState(payload.id, payload.hp, payload.name, geom, payload.x, payload.z)
+        val maxHp = payload.maxHp ?: 40
+        monsters[payload.id] = MonsterState(payload.id, payload.hp, maxHp, payload.name, geom, payload.x, payload.z)
     }
 
     private fun updateMonster(payload: MonsterPayload) {
         monsters[payload.id]?.let {
             it.hp = payload.hp
+            if (payload.maxHp != null) it.maxHp = payload.maxHp
             updateMonsterColor(it)
             it.targetX = payload.x
             it.targetZ = payload.z
@@ -691,7 +720,7 @@ class GameClientApp(private val playerName: String) : SimpleApplication() {
     }
 
     private fun updateMonsterColor(state: MonsterState) {
-        val hpRatio = state.hp.coerceAtLeast(0) / 30f
+        val hpRatio = state.hp.coerceAtLeast(0) / state.maxHp.toFloat().coerceAtLeast(1f)
         val mat = state.geom.material.clone()
         mat.setColor("Color", ColorRGBA(1f, hpRatio, hpRatio, 1f))
         state.geom.material = mat
@@ -722,9 +751,9 @@ class GameClientApp(private val playerName: String) : SimpleApplication() {
         val range = 2.2f
         val segments = 12
         for (i in 0..segments) {
-            val angle = FastMath.PI * (i.toFloat() / segments - 0.5f) // -90 to 90 deg
-            val x = FastMath.cos(angle) * range
-            val z = FastMath.sin(angle) * range
+            val angle = FastMath.HALF_PI * (i.toFloat() / segments - 0.5f) // -45 to 45 deg
+            val x = FastMath.sin(angle) * range
+            val z = FastMath.cos(angle) * range // fan points forward +Z
             val line = Geometry("attack-line-$i", Line(Vector3f.ZERO, Vector3f(x, 0f, z)))
             line.material = mat
             node.attachChild(line)
