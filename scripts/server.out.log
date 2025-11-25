@@ -1,0 +1,42 @@
+> Task :server:checkKotlinGradlePluginConfigurationErrors
+> Task :server:compileKotlin UP-TO-DATE
+> Task :server:compileJava NO-SOURCE
+> Task :server:processResources UP-TO-DATE
+> Task :server:classes UP-TO-DATE
+> Task :server:resolveMainClassName UP-TO-DATE
+
+> Task :server:bootRun
+
+  .   ____          _            __ _ _
+ /\\ / ___'_ __ _ _(_)_ __  __ _ \ \ \ \
+( ( )\___ | '_ | '_| | '_ \/ _` | \ \ \ \
+ \\/  ___)| |_)| | | | | || (_| |  ) ) ) )
+  '  |____| .__|_| |_|_| |_\__, | / / / /
+ =========|_|==============|___/=/_/_/_/
+
+ :: Spring Boot ::                (v3.3.3)
+
+2025-11-24T23:00:28.294-03:00  INFO 38280 --- [soulbound-server] [           main] dev.soulbound.server.ApplicationKt       : Starting ApplicationKt using Java 21.0.2 with PID 38280 (C:\Users\sergi\git\soulbound-mmorpg\server\build\classes\kotlin\main started by sergi in C:\Users\sergi\git\soulbound-mmorpg\server)
+2025-11-24T23:00:28.296-03:00  INFO 38280 --- [soulbound-server] [           main] dev.soulbound.server.ApplicationKt       : No active profile set, falling back to 1 default profile: "default"
+2025-11-24T23:00:28.909-03:00  INFO 38280 --- [soulbound-server] [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat initialized with port 8080 (http)
+2025-11-24T23:00:28.921-03:00  INFO 38280 --- [soulbound-server] [           main] o.apache.catalina.core.StandardService   : Starting service [Tomcat]
+2025-11-24T23:00:28.921-03:00  INFO 38280 --- [soulbound-server] [           main] o.apache.catalina.core.StandardEngine    : Starting Servlet engine: [Apache Tomcat/10.1.28]
+2025-11-24T23:00:28.959-03:00  INFO 38280 --- [soulbound-server] [           main] o.a.c.c.C.[Tomcat].[localhost].[/]       : Initializing Spring embedded WebApplicationContext
+2025-11-24T23:00:28.959-03:00  INFO 38280 --- [soulbound-server] [           main] w.s.c.ServletWebServerApplicationContext : Root WebApplicationContext: initialization completed in 619 ms
+2025-11-24T23:00:29.220-03:00  INFO 38280 --- [soulbound-server] [           main] o.s.b.w.embedded.tomcat.TomcatWebServer  : Tomcat started on port 8080 (http) with context path '/'
+2025-11-24T23:00:29.226-03:00  INFO 38280 --- [soulbound-server] [           main] dev.soulbound.server.ApplicationKt       : Started ApplicationKt in 1.18 seconds (process running for 1.408)
+2025-11-24T23:00:29.231-03:00  INFO 38280 --- [soulbound-server] [   scheduling-1] dev.soulbound.server.ws.GameHandler      : Spawned Zombie id=1 at (7.4273324,-0.71194595)
+2025-11-24T23:00:29.295-03:00  INFO 38280 --- [soulbound-server] [   scheduling-1] dev.soulbound.server.ws.GameHandler      : Spawned Zombie id=2 at (-2.4244153,-2.6401594)
+2025-11-24T23:00:29.296-03:00  INFO 38280 --- [soulbound-server] [   scheduling-1] dev.soulbound.server.ws.GameHandler      : Spawned Zombie id=3 at (-13.944743,9.161282)
+2025-11-24T23:00:29.296-03:00  INFO 38280 --- [soulbound-server] [   scheduling-1] dev.soulbound.server.ws.GameHandler      : Spawned Zombie id=4 at (21.667196,-3.5726871)
+2025-11-24T23:00:29.296-03:00  INFO 38280 --- [soulbound-server] [   scheduling-1] dev.soulbound.server.ws.GameHandler      : Spawned Zombie id=5 at (18.499346,-4.5748534)
+2025-11-24T23:00:29.296-03:00  INFO 38280 --- [soulbound-server] [   scheduling-1] dev.soulbound.server.ws.GameHandler      : Spawned Zombie id=6 at (-20.771427,20.870234)
+2025-11-24T23:00:32.834-03:00  INFO 38280 --- [soulbound-server] [nio-8080-exec-1] o.a.c.c.C.[Tomcat].[localhost].[/]       : Initializing Spring DispatcherServlet 'dispatcherServlet'
+2025-11-24T23:00:32.834-03:00  INFO 38280 --- [soulbound-server] [nio-8080-exec-1] o.s.web.servlet.DispatcherServlet        : Initializing Servlet 'dispatcherServlet'
+2025-11-24T23:00:32.835-03:00  INFO 38280 --- [soulbound-server] [nio-8080-exec-1] o.s.web.servlet.DispatcherServlet        : Completed initialization in 0 ms
+2025-11-24T23:00:32.882-03:00  INFO 38280 --- [soulbound-server] [nio-8080-exec-1] dev.soulbound.server.ws.GameHandler      : WS connected: ${session.id}
+2025-11-24T23:00:48.235-03:00  INFO 38280 --- [soulbound-server] [   scheduling-1] dev.soulbound.server.ws.GameHandler      : Spawned Zombie id=7 at (20.022478,12.441696)
+2025-11-24T23:01:07.235-03:00  INFO 38280 --- [soulbound-server] [   scheduling-1] dev.soulbound.server.ws.GameHandler      : Spawned Zombie id=8 at (-3.3577554,-19.812733)
+2025-11-24T23:01:10.240-03:00  INFO 38280 --- [soulbound-server] [   scheduling-1] dev.soulbound.server.ws.GameHandler      : Spawned Zombie id=9 at (-4.9258776,-19.079811)
+2025-11-24T23:01:11.230-03:00  INFO 38280 --- [soulbound-server] [   scheduling-1] dev.soulbound.server.ws.GameHandler      : Spawned Zombie id=10 at (15.986297,-16.242935)
+2025-11-24T23:01:13.238-03:00  INFO 38280 --- [soulbound-server] [   scheduling-1] dev.soulbound.server.ws.GameHandler      : Spawned Zombie id=11 at (-13.169472,-5.438275)

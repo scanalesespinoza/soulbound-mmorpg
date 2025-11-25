@@ -1,0 +1,7 @@
+> Task :client:checkKotlinGradlePluginConfigurationErrors
+> Task :client:compileKotlin UP-TO-DATE
+> Task :client:compileJava NO-SOURCE
+> Task :client:processResources NO-SOURCE
+> Task :client:classes UP-TO-DATE
+
+> Task :client:run
