@@ -56,6 +56,7 @@ data class PlayerPayload(
     val name: String?,
     val level: Int,
     val xp: Int,
+    val nextLevelXp: Int? = null,
     val x: Float? = null,
     val z: Float? = null,
     val hp: Int? = null,
@@ -65,7 +66,8 @@ data class PlayerPayload(
     val moveSpeed: Float? = null,
     val dead: Boolean? = null,
     val spawnX: Float? = null,
-    val spawnZ: Float? = null
+    val spawnZ: Float? = null,
+    val mapId: String? = null
 )
 data class MonsterState(
     val id: Int,

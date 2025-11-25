@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import dev.soulbound.server.application.GameEvent
 import dev.soulbound.server.application.GameService
+import dev.soulbound.server.ws.dto.PlayerDto
 import org.slf4j.LoggerFactory
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Component
@@ -77,7 +78,7 @@ class GameWebSocketHandler(
 
     private fun handleJoin(session: WebSocketSession, name: String) {
         val result = gameService.join(session.id, name)
-        send(session, WsMessage("join_ack", result.player))
+        send(session, WsMessage("join_ack", PlayerDto.from(result.player)))
         result.monsters.forEach { send(session, WsMessage("monster_spawn", it)) }
     }
 
@@ -91,8 +92,8 @@ class GameWebSocketHandler(
             is GameEvent.MonsterMove -> WsMessage("monster_move", event.monster)
             is GameEvent.MonsterUpdate -> WsMessage("monster_update", event.monster)
             is GameEvent.MonsterKilled -> WsMessage("monster_killed", mapOf("id" to event.id, "by" to event.byPlayerId))
-            is GameEvent.PlayerUpdate -> WsMessage("player_update", event.player)
-            is GameEvent.PlayerDead -> WsMessage("player_dead", event.player)
+            is GameEvent.PlayerUpdate -> WsMessage("player_update", PlayerDto.from(event.player))
+            is GameEvent.PlayerDead -> WsMessage("player_dead", PlayerDto.from(event.player))
         }
     }
 

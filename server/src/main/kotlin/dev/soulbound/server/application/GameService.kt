@@ -3,7 +3,10 @@ package dev.soulbound.server.application
 import dev.soulbound.server.domain.monster.Monster
 import dev.soulbound.server.domain.monster.MonsterRepository
 import dev.soulbound.server.domain.player.Player
+import dev.soulbound.server.domain.player.PlayerId
 import dev.soulbound.server.domain.player.PlayerRepository
+import dev.soulbound.server.domain.player.Stats
+import dev.soulbound.server.domain.world.Position
 import dev.soulbound.server.domain.world.WorldRepository
 import dev.soulbound.server.domain.world.WorldState
 import org.springframework.stereotype.Service
@@ -33,7 +36,9 @@ data class RespawnTask(val at: Long)
 class GameService(
     private val playerRepository: PlayerRepository,
     private val monsterRepository: MonsterRepository,
-    private val worldRepository: WorldRepository
+    private val worldRepository: WorldRepository,
+    private val progressionService: PlayerProgressionService,
+    private val lifeService: PlayerLifeService
     ) {
     private val rand = ThreadLocalRandom.current()
     private val monsterIdGen = AtomicInteger(1)
@@ -41,46 +46,44 @@ class GameService(
     private val respawnQueue = PriorityBlockingQueue<RespawnTask>(11, compareBy { it.at })
 
     fun join(sessionId: String, name: String): JoinResult {
-        val world = worldRepository.get()
-        val player = Player(id = sessionId, name = name).apply {
-            spawnX = 0f
-            spawnZ = 0f
-            x = spawnX
-            z = spawnZ
-            hp = maxHp
-        }
+        val player = Player(
+            id = PlayerId(sessionId),
+            name = name,
+            position = Position(0f, 0f),
+            spawnPosition = Position(0f, 0f),
+            stats = Stats(),
+            level = 1,
+            experience = 0,
+            nextLevelXp = 100
+        )
         playerRepository.save(player)
         return JoinResult(player, monsterRepository.findAll().toList())
     }
 
     fun disconnect(sessionId: String) {
-        playerRepository.delete(sessionId)
+        playerRepository.delete(PlayerId(sessionId))
     }
 
     fun updatePosition(sessionId: String, x: Float, z: Float) {
         val world = worldRepository.get()
-        playerRepository.findById(sessionId)?.let {
-            if (!it.dead) {
-                it.x = x.coerceIn(-world.mapLimit, world.mapLimit)
-                it.z = z.coerceIn(-world.mapLimit, world.mapLimit)
-                playerRepository.save(it)
+        playerRepository.findById(PlayerId(sessionId))?.let {
+            if (!it.isDead()) {
+                val newPos = Position(x, z).clamp(world.mapLimit)
+                playerRepository.save(it.withPosition(newPos))
             }
         }
     }
 
     fun respawn(sessionId: String): List<GameEvent> {
-        val p = playerRepository.findById(sessionId) ?: return emptyList()
-        p.dead = false
-        p.hp = p.maxHp
-        p.x = p.spawnX
-        p.z = p.spawnZ
-        playerRepository.save(p)
-        return listOf(GameEvent.PlayerUpdate(p))
+        val p = playerRepository.findById(PlayerId(sessionId)) ?: return emptyList()
+        val revived = p.revive()
+        playerRepository.save(revived)
+        return listOf(GameEvent.PlayerUpdate(revived))
     }
 
     fun attack(sessionId: String, fx: Float, fz: Float, monsterId: Int?): List<GameEvent> {
         val world = worldRepository.get()
-        val player = playerRepository.findById(sessionId) ?: return emptyList()
+        val player = playerRepository.findById(PlayerId(sessionId)) ?: return emptyList()
         val targets = if (monsterId != null) {
             listOfNotNull(monsterRepository.findById(monsterId))
         } else {
@@ -88,20 +91,20 @@ class GameService(
         }
         val events = mutableListOf<GameEvent>()
         val range = world.playerAttackRange
-        val damage = 14 + (player.level - 1) * 4
+        val damage = player.stats.attack
         val facingLen = kotlin.math.sqrt((fx * fx + fz * fz).toDouble()).toFloat().coerceAtLeast(0.001f)
         val facingNormX = fx / facingLen
         val facingNormZ = fz / facingLen
         targets.forEach { m ->
-            val dist = distance(player.x, player.z, m.x, m.z)
+            val dist = distance(player.position.x, player.position.z, m.x, m.z)
             if (dist <= range) {
-                val dirX = m.x - player.x
-                val dirZ = m.z - player.z
+                val dirX = m.x - player.position.x
+                val dirZ = m.z - player.position.z
                 val dirLen = kotlin.math.sqrt((dirX * dirX + dirZ * dirZ).toDouble()).toFloat().coerceAtLeast(0.001f)
                 val dot = (dirX / dirLen) * facingNormX + (dirZ / dirLen) * facingNormZ
                 if (dot >= 0f) {
                     m.hp -= damage
-                    knockback(m, player.x, player.z, world)
+                    knockback(m, player.position.x, player.position.z, world)
                     if (m.hp <= 0) {
                         handleMonsterDeath(player, m, events)
                     } else {
@@ -139,9 +142,9 @@ class GameService(
         monsterRepository.findAll().forEach { monster ->
             val moveState = moveStates.computeIfAbsent(monster.id) { newMoveState(world) }
             val nearest = nearestPlayer(monster.x, monster.z, world)
-            val target = if (nearest != null && nearest.second <= world.chaseRadius && !isInSafeZone(nearest.first.x, nearest.first.z, world)) {
+            val target = if (nearest != null && nearest.second <= world.chaseRadius && !isInSafeZone(nearest.first.position.x, nearest.first.position.z, world)) {
                 moveState.timer = 0.5
-                Pair(nearest.first.x, nearest.first.z)
+                Pair(nearest.first.position.x, nearest.first.position.z)
             } else {
                 moveState.timer -= dt.toDouble()
                 val distToTarget = distance(monster.x, monster.z, moveState.targetX, moveState.targetZ)
@@ -169,14 +172,14 @@ class GameService(
                     events.add(GameEvent.MonsterMove(monster))
                 }
                 playerRepository.findAll().forEach { p ->
-                    if (!p.dead && !isInSafeZone(p.x, p.z, world) && distance(monster.x, monster.z, p.x, p.z) <= world.attackRadius) {
-                        p.hp = (p.hp - (monster.attack)).coerceAtLeast(0)
-                        if (p.hp <= 0) {
-                            p.dead = true
-                            events.add(GameEvent.PlayerDead(p))
+                    if (!p.isDead() && !isInSafeZone(p.position.x, p.position.z, world) && distance(monster.x, monster.z, p.position.x, p.position.z) <= world.attackRadius) {
+                        val dmgResult = lifeService.applyDamage(p.id, monster.attack, p.stats.defense)
+                        dmgResult?.let { res ->
+                            if (res.died) {
+                                events.add(GameEvent.PlayerDead(res.player))
+                            }
+                            events.add(GameEvent.PlayerUpdate(res.player))
                         }
-                        playerRepository.save(p)
-                        events.add(GameEvent.PlayerUpdate(p))
                     }
                 }
             }
@@ -188,18 +191,10 @@ class GameService(
         monsterRepository.delete(monster.id)
         moveStates.remove(monster.id)
         scheduleRespawn()
-        player.xp += monster.xpReward
-        while (player.xp >= player.nextLevelXp()) {
-            player.xp -= player.nextLevelXp()
-            player.level += 1
-            player.maxHp += 20
-            player.attack += 2
-            player.defense += 1
-            player.hp = player.maxHp
-        }
-        playerRepository.save(player)
-        events.add(GameEvent.MonsterKilled(monster.id, player.id))
-        events.add(GameEvent.PlayerUpdate(player))
+        val progress = progressionService.addExperience(player.id, monster.xpReward)
+        val updatedPlayer = progress?.player ?: player
+        events.add(GameEvent.MonsterKilled(monster.id, player.id.value))
+        events.add(GameEvent.PlayerUpdate(updatedPlayer))
     }
 
     private fun scheduleRespawn() {
@@ -265,8 +260,8 @@ class GameService(
         var best: Player? = null
         var bestDist = Float.MAX_VALUE
         playerRepository.findAll().forEach {
-            if (isInSafeZone(it.x, it.z, world)) return@forEach
-            val d = distance(x, z, it.x, it.z)
+            if (isInSafeZone(it.position.x, it.position.z, world)) return@forEach
+            val d = distance(x, z, it.position.x, it.position.z)
             if (d < bestDist) {
                 bestDist = d
                 best = it
