@@ -2,6 +2,8 @@ package dev.soulbound.server.application
 
 import dev.soulbound.server.domain.monster.Monster
 import dev.soulbound.server.domain.monster.MonsterRepository
+import dev.soulbound.server.domain.monster.MonsterTemplate
+import dev.soulbound.server.domain.monster.MonsterTemplateProvider
 import dev.soulbound.server.domain.player.Player
 import dev.soulbound.server.domain.player.PlayerId
 import dev.soulbound.server.domain.player.PlayerRepository
@@ -27,7 +29,8 @@ sealed class GameEvent {
     data class MonsterUpdate(val monster: Monster) : GameEvent()
     data class MonsterKilled(val id: Int, val byPlayerId: String) : GameEvent()
     data class PlayerUpdate(val player: Player) : GameEvent()
-    data class PlayerDead(val player: Player) : GameEvent()
+    data class PlayerDead(val player: Player, val xpLost: Int) : GameEvent()
+    data class PlayerRespawned(val player: Player) : GameEvent()
 }
 
 data class MoveState(var targetX: Float, var targetZ: Float, var timer: Double)
@@ -40,35 +43,40 @@ class GameService(
     private val worldRepository: WorldRepository,
     private val progressionService: PlayerProgressionService,
     private val lifeService: PlayerLifeService,
-    private val worldService: WorldService
+    private val worldService: WorldService,
+    private val deathService: PlayerDeathService,
+    private val monsterTemplateProvider: MonsterTemplateProvider
     ) {
     private val rand = ThreadLocalRandom.current()
     private val monsterIdGen = AtomicInteger(1)
     private val moveStates = ConcurrentHashMap<Int, MoveState>()
     private val respawnQueue = PriorityBlockingQueue<RespawnTask>(11, compareBy { it.at })
 
-    fun join(sessionId: String, name: String): JoinResult {
-        val player = Player(
-            id = PlayerId(sessionId),
+    fun join(playerId: PlayerId, name: String): JoinResult {
+        val existing = playerRepository.findById(playerId)
+        val baseMap = worldService.currentMap()
+        val spawn = baseMap.safeZones.firstOrNull()?.let { Position((it.minX + it.maxX) / 2f, (it.minZ + it.maxZ) / 2f) } ?: Position(0f, 0f)
+        val player = existing ?: Player(
+            id = playerId,
             name = name,
             mapId = MapId("default"),
-            position = Position(0f, 0f),
-            spawnPosition = Position(0f, 0f),
+            position = spawn,
+            spawnPosition = spawn,
             stats = Stats(),
             level = 1,
             experience = 0,
             nextLevelXp = 100
         )
-        playerRepository.save(player)
-        return JoinResult(player, monsterRepository.findAll().toList())
+        val saved = playerRepository.save(player)
+        return JoinResult(saved, monsterRepository.findAll().toList())
     }
 
-    fun disconnect(sessionId: String) {
-        playerRepository.delete(PlayerId(sessionId))
+    fun disconnect(playerId: PlayerId) {
+        // mantenemos al jugador en el repositorio para persistencia
     }
 
-    fun updatePosition(sessionId: String, x: Float, z: Float) {
-        playerRepository.findById(PlayerId(sessionId))?.let { player ->
+    fun updatePosition(playerId: PlayerId, x: Float, z: Float) {
+        playerRepository.findById(playerId)?.let { player ->
             if (!player.isDead()) {
                 val newPos = Position(x, z)
                 val clamped = worldService.clampToBounds(player.mapId, newPos)
@@ -79,16 +87,14 @@ class GameService(
         }
     }
 
-    fun respawn(sessionId: String): List<GameEvent> {
-        val p = playerRepository.findById(PlayerId(sessionId)) ?: return emptyList()
-        val revived = p.revive()
-        playerRepository.save(revived)
-        return listOf(GameEvent.PlayerUpdate(revived))
+    fun respawn(playerId: PlayerId): List<GameEvent> {
+        val result = deathService.respawnPlayer(playerId) ?: return emptyList()
+        return listOf(GameEvent.PlayerRespawned(result.player), GameEvent.PlayerUpdate(result.player))
     }
 
-    fun attack(sessionId: String, fx: Float, fz: Float, monsterId: Int?): List<GameEvent> {
+    fun attack(playerId: PlayerId, fx: Float, fz: Float, monsterId: Int?): List<GameEvent> {
         val world = worldRepository.get()
-        val player = playerRepository.findById(PlayerId(sessionId)) ?: return emptyList()
+        val player = playerRepository.findById(playerId) ?: return emptyList()
         val targets = if (monsterId != null) {
             listOfNotNull(monsterRepository.findById(monsterId))
         } else {
@@ -108,7 +114,8 @@ class GameService(
                 val dirLen = kotlin.math.sqrt((dirX * dirX + dirZ * dirZ).toDouble()).toFloat().coerceAtLeast(0.001f)
                 val dot = (dirX / dirLen) * facingNormX + (dirZ / dirLen) * facingNormZ
                 if (dot >= 0f) {
-                    m.hp -= damage
+                    val dmgApplied = (damage - m.defense).coerceAtLeast(1)
+                    m.hp -= dmgApplied
                     knockback(m, player.position.x, player.position.z, world)
                     if (m.hp <= 0) {
                         handleMonsterDeath(player, m, events)
@@ -165,7 +172,8 @@ class GameService(
             val dirZ = target.second - monster.z
             val dist = sqrt((dirX * dirX + dirZ * dirZ).toDouble()).toFloat()
             if (dist > 0.001f) {
-                val step = (world.monsterSpeed * dt).coerceAtMost(dist)
+                val speed = monster.moveSpeed.takeIf { it > 0f } ?: world.monsterSpeed
+                val step = (speed * dt).coerceAtMost(dist)
                 val nx = monster.x + dirX / dist * step
                 val nz = monster.z + dirZ / dist * step
                 val bounded = confineMonsterToWild(nx, nz, world)
@@ -181,9 +189,13 @@ class GameService(
                         val dmgResult = lifeService.applyDamage(p.id, monster.attack, p.stats.defense)
                         dmgResult?.let { res ->
                             if (res.died) {
-                                events.add(GameEvent.PlayerDead(res.player))
+                                val death = deathService.handlePlayerDeath(p.id)
+                                death?.let { d ->
+                                    events.add(GameEvent.PlayerDead(d.player, d.xpLost))
+                                }
+                            } else {
+                                events.add(GameEvent.PlayerUpdate(res.player))
                             }
-                            events.add(GameEvent.PlayerUpdate(res.player))
                         }
                     }
                 }
@@ -214,15 +226,16 @@ class GameService(
         val chosen = spawnPoints[rand.nextInt(spawnPoints.size)]
         val pos = worldService.randomSpawnNear(chosen)
         val spawnPos = confineMonsterToWild(pos.x, pos.z, world)
+        val template = pickTemplate()
         val monster = Monster(
             id = monsterIdGen.getAndIncrement(),
-            name = "Zombie",
-            hp = 60,
-            maxHp = 60,
-            attack = 10,
-            defense = 3,
-            xpReward = 25,
-            moveSpeed = world.monsterSpeed,
+            name = template.displayName,
+            hp = template.maxHp,
+            maxHp = template.maxHp,
+            attack = template.attack,
+            defense = template.defense,
+            xpReward = template.xpReward,
+            moveSpeed = template.moveSpeed,
             x = spawnPos.first,
             z = spawnPos.second,
             spawnX = spawnPos.first,
@@ -237,6 +250,17 @@ class GameService(
         val target = randomWildPosition(world)
         val timer = rand.nextDouble(1.0, 3.0)
         return MoveState(target.first, target.second, timer)
+    }
+
+    private fun pickTemplate(): MonsterTemplate {
+        val templates = monsterTemplateProvider.all()
+        val totalWeight = templates.sumOf { it.weight }
+        var roll = rand.nextInt(totalWeight)
+        templates.forEach { t ->
+            roll -= t.weight
+            if (roll < 0) return t
+        }
+        return templates.first()
     }
 
     private fun randomWildPosition(world: WorldState): Pair<Float, Float> {

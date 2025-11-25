@@ -57,5 +57,11 @@ class NetworkClient(private val serverUri: URI) {
         wsClient.send(mapper.writeValueAsString(payload))
     }
 
+    fun sendRespawn() {
+        if (!isOpen()) return
+        val payload = mapOf("type" to "respawn", "data" to emptyMap<String, Any>())
+        wsClient.send(mapper.writeValueAsString(payload))
+    }
+
     fun isOpen(): Boolean = this::wsClient.isInitialized && wsClient.isOpen
 }

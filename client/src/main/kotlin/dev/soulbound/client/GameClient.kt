@@ -70,6 +70,26 @@ data class PlayerPayload(
     val spawnZ: Float? = null,
     val mapId: String? = null
 )
+
+data class PlayerDiedPayload(
+    val playerId: String,
+    val mapId: String,
+    val xpLost: Int,
+    val xpAfter: Int,
+    val level: Int
+)
+
+data class PlayerRespawnedPayload(
+    val playerId: String,
+    val mapId: String,
+    val x: Float,
+    val z: Float,
+    val hp: Int,
+    val maxHp: Int,
+    val level: Int,
+    val xp: Int,
+    val nextLevelXp: Int
+)
 data class MonsterState(
     val id: Int,
     var hp: Int,
@@ -136,6 +156,7 @@ class GameClientApp(private val playerName: String) : SimpleApplication() {
     private lateinit var healthBg: Geometry
     private lateinit var healthFill: Geometry
     private lateinit var notificationsText: BitmapText
+    private lateinit var deathText: BitmapText
     private val notifications = mutableListOf<Notification>()
     private val monsters = mutableMapOf<Int, MonsterState>()
     private val monsterRoot = Node("monsters")
@@ -235,6 +256,16 @@ class GameClientApp(private val playerName: String) : SimpleApplication() {
                     val player = mapper.convertValue<PlayerPayload>(data)
                     applyPlayerPayload(player)
                 }
+                "player_dead" -> {
+                    val data = msg.data ?: continue
+                    val payload = mapper.convertValue<PlayerDiedPayload>(data)
+                    handlePlayerDead(payload)
+                }
+                "player_respawned" -> {
+                    val data = msg.data ?: continue
+                    val payload = mapper.convertValue<PlayerRespawnedPayload>(data)
+                    handlePlayerRespawn(payload)
+                }
             }
         }
         attackCooldownTimer = max(0f, attackCooldownTimer - tpf)
@@ -282,6 +313,40 @@ class GameClientApp(private val playerName: String) : SimpleApplication() {
                 dead = dead
             )
         )
+        updateDeathOverlay()
+    }
+
+    private fun handlePlayerDead(payload: PlayerDiedPayload) {
+        dead = true
+        clearMovementInput()
+        gameState.updatePlayer(gameState.player.copy(dead = true, xp = payload.xpAfter, level = payload.level))
+        notifications.add(Notification("Has muerto. Perdistes ${payload.xpLost} XP", 4f))
+        updateDeathOverlay()
+    }
+
+    private fun handlePlayerRespawn(payload: PlayerRespawnedPayload) {
+        dead = false
+        hp = payload.hp.toFloat()
+        maxHp = payload.maxHp.toFloat()
+        level = payload.level
+        xp = payload.xp
+        nextLevelXp = payload.nextLevelXp
+        playerNode.localTranslation = playerNode.localTranslation.setX(payload.x).setZ(payload.z)
+        clearMovementInput()
+        gameState.updatePlayer(
+            gameState.player.copy(
+                dead = false,
+                hp = payload.hp,
+                maxHp = payload.maxHp,
+                level = payload.level,
+                xp = payload.xp,
+                nextLevelXp = payload.nextLevelXp,
+                x = payload.x,
+                z = payload.z
+            )
+        )
+        notifications.add(Notification("Has respawneado", 3f))
+        updateDeathOverlay()
     }
 
     private fun updateMovement(tpf: Float) {
@@ -371,6 +436,15 @@ class GameClientApp(private val playerName: String) : SimpleApplication() {
         }
         guiNode.attachChild(healthBg)
         guiNode.attachChild(healthFill)
+
+        deathText = BitmapText(font, false).apply {
+            size = 48f
+            color = ColorRGBA(1f, 0.2f, 0.2f, 1f)
+            text = "HAS MUERTO\nPresiona R para respawnear"
+            setLocalTranslation(cam.width / 2f - lineWidth / 2f, cam.height / 2f, 0f)
+            cullHint = Spatial.CullHint.Always
+        }
+        guiNode.attachChild(deathText)
     }
 
     private fun setupScene() {
@@ -442,7 +516,8 @@ class GameClientApp(private val playerName: String) : SimpleApplication() {
         inputManager.addMapping("move_left", KeyTrigger(KeyInput.KEY_A))
         inputManager.addMapping("move_right", KeyTrigger(KeyInput.KEY_D))
         inputManager.addMapping("move_click", MouseButtonTrigger(MouseInput.BUTTON_LEFT))
-        inputManager.addListener(actionListener, "attack", "move_forward", "move_backward", "move_left", "move_right", "move_click")
+        inputManager.addMapping("respawn", KeyTrigger(KeyInput.KEY_R))
+        inputManager.addListener(actionListener, "attack", "move_forward", "move_backward", "move_left", "move_right", "move_click", "respawn")
     }
 
     private fun applyGravity(tpf: Float) {
@@ -697,6 +772,7 @@ class GameClientApp(private val playerName: String) : SimpleApplication() {
         val hpPct = (hp / maxHp).coerceIn(0f, 1f)
         healthFill.localTranslation = Vector3f(barX, barY, 0f)
         healthFill.localScale = Vector3f(hpPct, 1f, 1f)
+        updateDeathOverlay()
 
         // Damage flash
         if (hitFlashTimer > 0f) {
@@ -715,20 +791,26 @@ class GameClientApp(private val playerName: String) : SimpleApplication() {
     private val actionListener = ActionListener { name, isPressed, _ ->
         when (name) {
             "attack" -> if (isPressed) {
+                if (dead) return@ActionListener
                 if (attackCooldownTimer > 0f) return@ActionListener
                 val facing = facingDir.normalize()
                 netClient.sendAttack(facing.x, facing.z, null)
                 attackTimer = swordSwingDuration
                 attackCooldownTimer = swordSwingDuration + attackCooldownDuration
             }
-            "move_forward" -> moveForward = isPressed
-            "move_backward" -> moveBackward = isPressed
-            "move_left" -> moveLeft = isPressed
-            "move_right" -> moveRight = isPressed
-            "move_click" -> if (!isPressed) {
+            "move_forward" -> if (!dead) moveForward = isPressed
+            "move_backward" -> if (!dead) moveBackward = isPressed
+            "move_left" -> if (!dead) moveLeft = isPressed
+            "move_right" -> if (!dead) moveRight = isPressed
+            "move_click" -> if (!isPressed && !dead) {
                 pickGroundTarget()?.let {
                     moveTarget = it
                     updatePathVisual()
+                }
+            }
+            "respawn" -> if (!isPressed) {
+                if (dead) {
+                    netClient.sendRespawn()
                 }
             }
         }
@@ -782,6 +864,19 @@ class GameClientApp(private val playerName: String) : SimpleApplication() {
         }
         monsters.remove(id)
         gameState.removeEnemy(id)
+    }
+
+    private fun updateDeathOverlay() {
+        deathText.cullHint = if (dead) Spatial.CullHint.Inherit else Spatial.CullHint.Always
+    }
+
+    private fun clearMovementInput() {
+        moveForward = false
+        moveBackward = false
+        moveLeft = false
+        moveRight = false
+        moveTarget = null
+        clearPathVisual()
     }
 
     private fun updateMonsterColor(state: MonsterState) {

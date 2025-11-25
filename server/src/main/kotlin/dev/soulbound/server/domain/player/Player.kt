@@ -26,9 +26,12 @@ data class Player(
         return copy(stats = updatedStats, dead = updatedStats.isDead)
     }
 
+    fun kill(): Player = copy(stats = stats.copy(currentHp = 0), dead = true)
+
     fun heal(amount: Int): Player = copy(stats = stats.heal(amount), dead = false)
 
-    fun revive(): Player = copy(dead = false, stats = stats.copy(currentHp = stats.maxHp), position = spawnPosition)
+    fun revive(at: Position = spawnPosition, hpAmount: Int = stats.maxHp): Player =
+        copy(dead = false, stats = stats.copy(currentHp = hpAmount), position = at)
 
     fun withStats(newStats: Stats): Player = copy(stats = newStats, dead = newStats.isDead)
 

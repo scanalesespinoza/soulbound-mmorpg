@@ -4,7 +4,10 @@ import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
 import dev.soulbound.server.application.GameEvent
 import dev.soulbound.server.application.GameService
+import dev.soulbound.server.domain.player.PlayerId
+import dev.soulbound.server.ws.dto.PlayerDiedDto
 import dev.soulbound.server.ws.dto.PlayerDto
+import dev.soulbound.server.ws.dto.PlayerRespawnedDto
 import org.slf4j.LoggerFactory
 import org.springframework.scheduling.annotation.Scheduled
 import org.springframework.stereotype.Component
@@ -23,6 +26,7 @@ class GameWebSocketHandler(
 
     private val log = LoggerFactory.getLogger(javaClass)
     private val sessions = ConcurrentHashMap<String, WebSocketSession>()
+    private val sessionToPlayerId = ConcurrentHashMap<String, PlayerId>()
 
     override fun afterConnectionEstablished(session: WebSocketSession) {
         sessions[session.id] = session
@@ -31,7 +35,8 @@ class GameWebSocketHandler(
 
     override fun afterConnectionClosed(session: WebSocketSession, status: org.springframework.web.socket.CloseStatus) {
         sessions.remove(session.id)
-        gameService.disconnect(session.id)
+        sessionToPlayerId[session.id]?.let { gameService.disconnect(it) }
+        sessionToPlayerId.remove(session.id)
         log.info("WS disconnected: ${'$'}{session.id}")
     }
 
@@ -48,17 +53,20 @@ class GameWebSocketHandler(
                     val monsterId = (data?.get("monsterId") as? Number)?.toInt()
                     val fx = (data?.get("fx") as? Number)?.toFloat() ?: 0f
                     val fz = (data?.get("fz") as? Number)?.toFloat() ?: 1f
-                    val events = gameService.attack(session.id, fx, fz, monsterId)
+                    val playerId = sessionToPlayerId[session.id] ?: return
+                    val events = gameService.attack(playerId, fx, fz, monsterId)
                     broadcastEvents(events)
                 }
                 "pos" -> {
                     val data = envelope["data"] as? Map<*, *> ?: return
                     val px = (data["x"] as? Number)?.toFloat() ?: return
                     val pz = (data["z"] as? Number)?.toFloat() ?: return
-                    gameService.updatePosition(session.id, px, pz)
+                    val playerId = sessionToPlayerId[session.id] ?: return
+                    gameService.updatePosition(playerId, px, pz)
                 }
                 "respawn" -> {
-                    broadcastEvents(gameService.respawn(session.id))
+                    val playerId = sessionToPlayerId[session.id] ?: return
+                    broadcastEvents(gameService.respawn(playerId))
                 }
             }
         } catch (ex: Exception) {
@@ -77,7 +85,9 @@ class GameWebSocketHandler(
     }
 
     private fun handleJoin(session: WebSocketSession, name: String) {
-        val result = gameService.join(session.id, name)
+        val playerId = PlayerId(name.lowercase())
+        sessionToPlayerId[session.id] = playerId
+        val result = gameService.join(playerId, name)
         send(session, WsMessage("join_ack", PlayerDto.from(result.player)))
         result.monsters.forEach { send(session, WsMessage("monster_spawn", it)) }
     }
@@ -93,7 +103,8 @@ class GameWebSocketHandler(
             is GameEvent.MonsterUpdate -> WsMessage("monster_update", event.monster)
             is GameEvent.MonsterKilled -> WsMessage("monster_killed", mapOf("id" to event.id, "by" to event.byPlayerId))
             is GameEvent.PlayerUpdate -> WsMessage("player_update", PlayerDto.from(event.player))
-            is GameEvent.PlayerDead -> WsMessage("player_dead", PlayerDto.from(event.player))
+            is GameEvent.PlayerDead -> WsMessage("player_dead", PlayerDiedDto(event.player.id.value, event.player.mapId.value, event.xpLost, event.player.experience, event.player.level))
+            is GameEvent.PlayerRespawned -> WsMessage("player_respawned", PlayerRespawnedDto(event.player.id.value, event.player.mapId.value, event.player.position.x, event.player.position.z, event.player.stats.currentHp, event.player.stats.maxHp, event.player.level, event.player.experience, event.player.nextLevelXp))
         }
     }
 

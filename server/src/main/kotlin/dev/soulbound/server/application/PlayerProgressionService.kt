@@ -41,7 +41,7 @@ class PlayerProgressionService(
         }
 
         val updated = player.withProgression(level, totalXp, nextXp, stats)
-        playerRepository.save(updated)
-        return ProgressResult(updated, leveledUp)
+        val saved = playerRepository.save(updated)
+        return ProgressResult(saved, leveledUp)
     }
 }

@@ -17,4 +17,6 @@ data class ClientPlayerState(
     val spawnZ: Float = 0f,
     val mapId: String = "default",
     val dead: Boolean = false
-)
+) {
+    val alive: Boolean get() = !dead && hp > 0
+}
