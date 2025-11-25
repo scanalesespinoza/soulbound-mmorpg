@@ -1,0 +1,36 @@
+# Gradle
+.gradle/
+build/
+*/build/
+
+# IDE / OS
+.idea/
+*.iml
+*.ipr
+*.iws
+.classpath
+.project
+.settings/
+*.swp
+*.swo
+Thumbs.db
+*.DS_Store
+
+# Logs / temp
+scripts/*.log
+scripts/pids.json
+*.log
+*.tmp
+
+# Distributions
+*.tar
+*.zip
+
+# Kotlin / JME caches
+**/kotlin/compile*/cacheable/
+**/kotlin/compile*/local-state/
+**/kotlin/compile*/classpath-snapshot/
+
+# Reports
+build/reports/
+**/reports/
