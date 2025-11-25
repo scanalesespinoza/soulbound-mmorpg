@@ -1,0 +1,293 @@
+package dev.soulbound.server.application
+
+import dev.soulbound.server.domain.monster.Monster
+import dev.soulbound.server.domain.monster.MonsterRepository
+import dev.soulbound.server.domain.player.Player
+import dev.soulbound.server.domain.player.PlayerRepository
+import dev.soulbound.server.domain.world.WorldRepository
+import dev.soulbound.server.domain.world.WorldState
+import org.springframework.stereotype.Service
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.PriorityBlockingQueue
+import java.util.concurrent.ThreadLocalRandom
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.cos
+import kotlin.math.sin
+import kotlin.math.sqrt
+
+data class JoinResult(val player: Player, val monsters: List<Monster>)
+
+sealed class GameEvent {
+    data class MonsterSpawn(val monster: Monster) : GameEvent()
+    data class MonsterMove(val monster: Monster) : GameEvent()
+    data class MonsterUpdate(val monster: Monster) : GameEvent()
+    data class MonsterKilled(val id: Int, val byPlayerId: String) : GameEvent()
+    data class PlayerUpdate(val player: Player) : GameEvent()
+    data class PlayerDead(val player: Player) : GameEvent()
+}
+
+data class MoveState(var targetX: Float, var targetZ: Float, var timer: Double)
+data class RespawnTask(val at: Long)
+
+@Service
+class GameService(
+    private val playerRepository: PlayerRepository,
+    private val monsterRepository: MonsterRepository,
+    private val worldRepository: WorldRepository
+    ) {
+    private val rand = ThreadLocalRandom.current()
+    private val monsterIdGen = AtomicInteger(1)
+    private val moveStates = ConcurrentHashMap<Int, MoveState>()
+    private val respawnQueue = PriorityBlockingQueue<RespawnTask>(11, compareBy { it.at })
+
+    fun join(sessionId: String, name: String): JoinResult {
+        val world = worldRepository.get()
+        val player = Player(id = sessionId, name = name).apply {
+            spawnX = 0f
+            spawnZ = 0f
+            x = spawnX
+            z = spawnZ
+            hp = maxHp
+        }
+        playerRepository.save(player)
+        return JoinResult(player, monsterRepository.findAll().toList())
+    }
+
+    fun disconnect(sessionId: String) {
+        playerRepository.delete(sessionId)
+    }
+
+    fun updatePosition(sessionId: String, x: Float, z: Float) {
+        val world = worldRepository.get()
+        playerRepository.findById(sessionId)?.let {
+            if (!it.dead) {
+                it.x = x.coerceIn(-world.mapLimit, world.mapLimit)
+                it.z = z.coerceIn(-world.mapLimit, world.mapLimit)
+                playerRepository.save(it)
+            }
+        }
+    }
+
+    fun respawn(sessionId: String): List<GameEvent> {
+        val p = playerRepository.findById(sessionId) ?: return emptyList()
+        p.dead = false
+        p.hp = p.maxHp
+        p.x = p.spawnX
+        p.z = p.spawnZ
+        playerRepository.save(p)
+        return listOf(GameEvent.PlayerUpdate(p))
+    }
+
+    fun attack(sessionId: String, fx: Float, fz: Float, monsterId: Int?): List<GameEvent> {
+        val world = worldRepository.get()
+        val player = playerRepository.findById(sessionId) ?: return emptyList()
+        val targets = if (monsterId != null) {
+            listOfNotNull(monsterRepository.findById(monsterId))
+        } else {
+            monsterRepository.findAll()
+        }
+        val events = mutableListOf<GameEvent>()
+        val range = world.playerAttackRange
+        val damage = 14 + (player.level - 1) * 4
+        val facingLen = kotlin.math.sqrt((fx * fx + fz * fz).toDouble()).toFloat().coerceAtLeast(0.001f)
+        val facingNormX = fx / facingLen
+        val facingNormZ = fz / facingLen
+        targets.forEach { m ->
+            val dist = distance(player.x, player.z, m.x, m.z)
+            if (dist <= range) {
+                val dirX = m.x - player.x
+                val dirZ = m.z - player.z
+                val dirLen = kotlin.math.sqrt((dirX * dirX + dirZ * dirZ).toDouble()).toFloat().coerceAtLeast(0.001f)
+                val dot = (dirX / dirLen) * facingNormX + (dirZ / dirLen) * facingNormZ
+                if (dot >= 0f) {
+                    m.hp -= damage
+                    knockback(m, player.x, player.z, world)
+                    if (m.hp <= 0) {
+                        handleMonsterDeath(player, m, events)
+                    } else {
+                        monsterRepository.save(m)
+                        events.add(GameEvent.MonsterUpdate(m))
+                    }
+                }
+            }
+        }
+        return events
+    }
+
+    fun spawnTick(): List<GameEvent> {
+        val world = worldRepository.get()
+        val events = mutableListOf<GameEvent>()
+        val now = System.currentTimeMillis()
+        if (respawnQueue.isEmpty() && monsterRepository.findAll().size < world.maxMonsters) {
+            repeat(world.maxMonsters - monsterRepository.findAll().size) {
+                spawnMonster(world)?.let { events.add(it) }
+            }
+        }
+        while (respawnQueue.peek()?.at?.let { it <= now } == true) {
+            respawnQueue.poll()
+            if (monsterRepository.findAll().size < world.maxMonsters) {
+                spawnMonster(world)?.let { events.add(it) }
+            }
+        }
+        return events
+    }
+
+    fun worldTick(): List<GameEvent> {
+        val world = worldRepository.get()
+        val dt = 0.2f
+        val events = mutableListOf<GameEvent>()
+        monsterRepository.findAll().forEach { monster ->
+            val moveState = moveStates.computeIfAbsent(monster.id) { newMoveState(world) }
+            val nearest = nearestPlayer(monster.x, monster.z, world)
+            val target = if (nearest != null && nearest.second <= world.chaseRadius && !isInSafeZone(nearest.first.x, nearest.first.z, world)) {
+                moveState.timer = 0.5
+                Pair(nearest.first.x, nearest.first.z)
+            } else {
+                moveState.timer -= dt.toDouble()
+                val distToTarget = distance(monster.x, monster.z, moveState.targetX, moveState.targetZ)
+                if (distToTarget < 0.5f || moveState.timer <= 0.0) {
+                    val newState = newMoveState(world)
+                    moveState.targetX = newState.targetX
+                    moveState.targetZ = newState.targetZ
+                    moveState.timer = newState.timer
+                }
+                Pair(moveState.targetX, moveState.targetZ)
+            }
+            val dirX = target.first - monster.x
+            val dirZ = target.second - monster.z
+            val dist = sqrt((dirX * dirX + dirZ * dirZ).toDouble()).toFloat()
+            if (dist > 0.001f) {
+                val step = (world.monsterSpeed * dt).coerceAtMost(dist)
+                val nx = monster.x + dirX / dist * step
+                val nz = monster.z + dirZ / dist * step
+                val bounded = confineMonsterToWild(nx, nz, world)
+                val moved = bounded.first != monster.x || bounded.second != monster.z
+                monster.x = bounded.first
+                monster.z = bounded.second
+                monsterRepository.save(monster)
+                if (moved) {
+                    events.add(GameEvent.MonsterMove(monster))
+                }
+                playerRepository.findAll().forEach { p ->
+                    if (!p.dead && !isInSafeZone(p.x, p.z, world) && distance(monster.x, monster.z, p.x, p.z) <= world.attackRadius) {
+                        p.hp = (p.hp - (monster.attack)).coerceAtLeast(0)
+                        if (p.hp <= 0) {
+                            p.dead = true
+                            events.add(GameEvent.PlayerDead(p))
+                        }
+                        playerRepository.save(p)
+                        events.add(GameEvent.PlayerUpdate(p))
+                    }
+                }
+            }
+        }
+        return events
+    }
+
+    private fun handleMonsterDeath(player: Player, monster: Monster, events: MutableList<GameEvent>) {
+        monsterRepository.delete(monster.id)
+        moveStates.remove(monster.id)
+        scheduleRespawn()
+        player.xp += monster.xpReward
+        while (player.xp >= player.nextLevelXp()) {
+            player.xp -= player.nextLevelXp()
+            player.level += 1
+            player.maxHp += 20
+            player.attack += 2
+            player.defense += 1
+            player.hp = player.maxHp
+        }
+        playerRepository.save(player)
+        events.add(GameEvent.MonsterKilled(monster.id, player.id))
+        events.add(GameEvent.PlayerUpdate(player))
+    }
+
+    private fun scheduleRespawn() {
+        val delayMillis = rand.nextLong(5000L, 10001L)
+        respawnQueue.offer(RespawnTask(System.currentTimeMillis() + delayMillis))
+    }
+
+    private fun spawnMonster(world: WorldState): GameEvent? {
+        val (baseX, baseZ) = randomWildPosition(world)
+        val jitterX = rand.nextDouble(-2.0, 2.0).toFloat()
+        val jitterZ = rand.nextDouble(-2.0, 2.0).toFloat()
+        val spawnPos = confineMonsterToWild(baseX + jitterX, baseZ + jitterZ, world)
+        val monster = Monster(
+            id = monsterIdGen.getAndIncrement(),
+            name = "Zombie",
+            hp = 60,
+            maxHp = 60,
+            attack = 10,
+            defense = 3,
+            xpReward = 25,
+            moveSpeed = world.monsterSpeed,
+            x = spawnPos.first,
+            z = spawnPos.second,
+            spawnX = spawnPos.first,
+            spawnZ = spawnPos.second
+        )
+        monsterRepository.save(monster)
+        moveStates[monster.id] = newMoveState(world)
+        return GameEvent.MonsterSpawn(monster)
+    }
+
+    private fun newMoveState(world: WorldState): MoveState {
+        val target = randomWildPosition(world)
+        val timer = rand.nextDouble(1.0, 3.0)
+        return MoveState(target.first, target.second, timer)
+    }
+
+    private fun randomWildPosition(world: WorldState): Pair<Float, Float> {
+        val radius = rand.nextDouble(world.wildRadiusMin.toDouble(), world.wildRadiusMax.toDouble()).toFloat()
+        val angle = rand.nextDouble(0.0, Math.PI * 2)
+        val x = (cos(angle) * radius).toFloat()
+        val z = (sin(angle) * radius).toFloat()
+        return Pair(x.coerceIn(-world.mapLimit, world.mapLimit), z.coerceIn(-world.mapLimit, world.mapLimit))
+    }
+
+    private fun confineMonsterToWild(x: Float, z: Float, world: WorldState): Pair<Float, Float> {
+        val clampedX = x.coerceIn(-world.mapLimit, world.mapLimit)
+        val clampedZ = z.coerceIn(-world.mapLimit, world.mapLimit)
+        val distToCenter = distance(clampedX, clampedZ, 0f, 0f)
+        return if (distToCenter < world.safeRadius) {
+            if (distToCenter < 0.001f) {
+                Pair(world.safeRadius, 0f)
+            } else {
+                val scale = world.safeRadius / distToCenter
+                Pair(clampedX * scale, clampedZ * scale)
+            }
+        } else Pair(clampedX, clampedZ)
+    }
+
+    private fun isInSafeZone(x: Float, z: Float, world: WorldState) = distance(x, z, 0f, 0f) <= world.safeRadius
+
+    private fun nearestPlayer(x: Float, z: Float, world: WorldState): Pair<Player, Float>? {
+        var best: Player? = null
+        var bestDist = Float.MAX_VALUE
+        playerRepository.findAll().forEach {
+            if (isInSafeZone(it.x, it.z, world)) return@forEach
+            val d = distance(x, z, it.x, it.z)
+            if (d < bestDist) {
+                bestDist = d
+                best = it
+            }
+        }
+        return if (best != null) Pair(best!!, bestDist) else null
+    }
+
+    private fun knockback(monster: Monster, px: Float, pz: Float, world: WorldState) {
+        val dirX = monster.x - px
+        val dirZ = monster.z - pz
+        val len = sqrt((dirX * dirX + dirZ * dirZ).toDouble()).toFloat().coerceAtLeast(0.001f)
+        val kb = 2.4f
+        val bounded = confineMonsterToWild(monster.x + dirX / len * kb, monster.z + dirZ / len * kb, world)
+        monster.x = bounded.first
+        monster.z = bounded.second
+    }
+
+    private fun distance(x1: Float, z1: Float, x2: Float, z2: Float): Float {
+        val dx = x1 - x2
+        val dz = z1 - z2
+        return sqrt((dx * dx + dz * dz).toDouble()).toFloat()
+    }
+}

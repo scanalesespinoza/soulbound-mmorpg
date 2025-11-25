@@ -1,4 +1,4 @@
-package dev.soulbound.server.model
+package dev.soulbound.server.domain.player
 
 data class Player(
     val id: String,

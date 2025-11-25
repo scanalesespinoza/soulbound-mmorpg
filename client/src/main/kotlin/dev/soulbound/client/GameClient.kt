@@ -98,7 +98,9 @@ class GameClientApp(private val playerName: String) : SimpleApplication() {
     private val groundY = 0.1f
     private val moveSpeed = 8f
     private val clickArriveThreshold = 0.2f
-    private val floorLimit = 23f
+    private val mapLimit = 45f
+    private val safeRadius = 12f
+    private val wildRadiusStart = 18f
     private var maxHp = 100f
     private var hp = maxHp
     private var clickMarker: Geometry? = null
@@ -370,7 +372,8 @@ class GameClientApp(private val playerName: String) : SimpleApplication() {
     }
 
     private fun setupScene() {
-        val floor = Box(25f, 0.1f, 25f)
+        val floorHalfSize = mapLimit + 10f
+        val floor = Box(floorHalfSize, 0.1f, floorHalfSize)
         floorGeom = Geometry("floor", floor)
         val floorMat = Material(assetManager, "Common/MatDefs/Misc/Unshaded.j3md")
         floorMat.setColor("Color", ColorRGBA(0.25f, 0.55f, 0.25f, 1f))
@@ -378,6 +381,7 @@ class GameClientApp(private val playerName: String) : SimpleApplication() {
         floorGeom.localTranslation = Vector3f.ZERO
         rootNode.attachChild(floorGeom)
         addFloorGrid()
+        addZoneMarkers()
 
         playerNode = Node("player")
         playerBody = Geometry("player-body", Box(0.5f, 0.8f, 0.5f))
@@ -499,8 +503,8 @@ class GameClientApp(private val playerName: String) : SimpleApplication() {
     }
 
     private fun clampToFloor(pos: Vector3f): Vector3f {
-        val clampedX = pos.x.coerceIn(-floorLimit, floorLimit)
-        val clampedZ = pos.z.coerceIn(-floorLimit, floorLimit)
+        val clampedX = pos.x.coerceIn(-mapLimit, mapLimit)
+        val clampedZ = pos.z.coerceIn(-mapLimit, mapLimit)
         return Vector3f(clampedX, pos.y, clampedZ)
     }
 
@@ -558,19 +562,60 @@ class GameClientApp(private val playerName: String) : SimpleApplication() {
             it.setColor("Color", ColorRGBA(0f, 0f, 0f, 0.35f))
         }
         val step = 2f
-        val half = 25
+        val extent = mapLimit + 6f
+        val half = (extent / step).toInt()
         for (i in -half..half) {
             val x = i * step
-            val lineX = Geometry("grid-x-$i", Line(Vector3f(x, groundY + 0.01f, -half * step), Vector3f(x, groundY + 0.01f, half * step)))
+            val lineX = Geometry("grid-x-$i", Line(Vector3f(x, groundY + 0.01f, -extent), Vector3f(x, groundY + 0.01f, extent)))
             lineX.material = gridMat
             grid.attachChild(lineX)
 
             val z = i * step
-            val lineZ = Geometry("grid-z-$i", Line(Vector3f(-half * step, groundY + 0.01f, z), Vector3f(half * step, groundY + 0.01f, z)))
+            val lineZ = Geometry("grid-z-$i", Line(Vector3f(-extent, groundY + 0.01f, z), Vector3f(extent, groundY + 0.01f, z)))
             lineZ.material = gridMat
             grid.attachChild(lineZ)
         }
         rootNode.attachChild(grid)
+    }
+
+    private fun addZoneMarkers() {
+        val safeMat = Material(assetManager, "Common/MatDefs/Misc/Unshaded.j3md").also {
+            it.setColor("Color", ColorRGBA(0.5f, 0.8f, 1f, 0.25f))
+            it.additionalRenderState.blendMode = RenderState.BlendMode.Alpha
+        }
+        val overlayY = groundY + 0.02f
+        val safePad = Geometry("safe-zone", Box(safeRadius, 0.01f, safeRadius)).apply {
+            material = safeMat
+            localTranslation = Vector3f(0f, overlayY, 0f)
+        }
+        rootNode.attachChild(safePad)
+
+        val safeRing = buildCircleRing("safe-ring", safeRadius, ColorRGBA(0.35f, 0.7f, 1f, 0.8f))
+        safeRing.localTranslation = Vector3f(0f, overlayY + 0.01f, 0f)
+        rootNode.attachChild(safeRing)
+
+        val wildRing = buildCircleRing("wild-ring", wildRadiusStart, ColorRGBA(1f, 0.45f, 0.3f, 0.8f))
+        wildRing.localTranslation = Vector3f(0f, overlayY + 0.01f, 0f)
+        rootNode.attachChild(wildRing)
+    }
+
+    private fun buildCircleRing(name: String, radius: Float, color: ColorRGBA): Node {
+        val ring = Node(name)
+        val mat = Material(assetManager, "Common/MatDefs/Misc/Unshaded.j3md").also {
+            it.setColor("Color", color)
+            it.additionalRenderState.blendMode = RenderState.BlendMode.Alpha
+        }
+        val segments = 48
+        var prev = Vector3f(radius, 0f, 0f)
+        for (i in 1..segments) {
+            val angle = (FastMath.TWO_PI * i) / segments
+            val next = Vector3f(FastMath.cos(angle) * radius, 0f, FastMath.sin(angle) * radius)
+            val line = Geometry("$name-$i", Line(prev, next))
+            line.material = mat
+            ring.attachChild(line)
+            prev = next
+        }
+        return ring
     }
 
     private fun addFaceFeatures(parent: Node) {

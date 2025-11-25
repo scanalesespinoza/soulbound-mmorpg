@@ -1,4 +1,4 @@
-package dev.soulbound.server.model
+package dev.soulbound.server.domain.monster
 
 data class Monster(
     val id: Int,
