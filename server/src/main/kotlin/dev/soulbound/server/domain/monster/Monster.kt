@@ -3,6 +3,7 @@ package dev.soulbound.server.domain.monster
 data class Monster(
     val id: Int,
     val name: String,
+    val type: EnemyType,
     var hp: Int,
     var maxHp: Int,
     var attack: Int,

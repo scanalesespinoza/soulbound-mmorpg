@@ -41,6 +41,7 @@ data class WsMessage(val type: String, val data: Any?)
 data class MonsterPayload(
     val id: Int,
     val name: String,
+    val type: String? = null,
     val hp: Int,
     val maxHp: Int? = null,
     val attack: Int? = null,

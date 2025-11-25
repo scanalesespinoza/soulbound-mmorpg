@@ -16,7 +16,7 @@ class InMemoryWorldRepository : WorldRepository {
             maxMonsters = 8,
             monsterSpeed = 2.25f,
             chaseRadius = 20f,
-            attackRadius = 1.2f,
+            attackRadius = 1.8f,
             playerAttackRange = 2.2f
         )
     )

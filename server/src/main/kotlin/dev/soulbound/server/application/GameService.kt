@@ -1,9 +1,10 @@
 package dev.soulbound.server.application
 
+import dev.soulbound.server.domain.monster.EnemyDefinition
+import dev.soulbound.server.domain.monster.EnemyDefinitionProvider
+import dev.soulbound.server.domain.monster.EnemyStats
 import dev.soulbound.server.domain.monster.Monster
 import dev.soulbound.server.domain.monster.MonsterRepository
-import dev.soulbound.server.domain.monster.MonsterTemplate
-import dev.soulbound.server.domain.monster.MonsterTemplateProvider
 import dev.soulbound.server.domain.player.Player
 import dev.soulbound.server.domain.player.PlayerId
 import dev.soulbound.server.domain.player.PlayerRepository
@@ -45,7 +46,8 @@ class GameService(
     private val lifeService: PlayerLifeService,
     private val worldService: WorldService,
     private val deathService: PlayerDeathService,
-    private val monsterTemplateProvider: MonsterTemplateProvider
+    private val enemyDefinitionProvider: EnemyDefinitionProvider,
+    private val combatEngine: CombatEngine
     ) {
     private val rand = ThreadLocalRandom.current()
     private val monsterIdGen = AtomicInteger(1)
@@ -102,7 +104,6 @@ class GameService(
         }
         val events = mutableListOf<GameEvent>()
         val range = world.playerAttackRange
-        val damage = player.stats.attack
         val facingLen = kotlin.math.sqrt((fx * fx + fz * fz).toDouble()).toFloat().coerceAtLeast(0.001f)
         val facingNormX = fx / facingLen
         val facingNormZ = fz / facingLen
@@ -114,7 +115,7 @@ class GameService(
                 val dirLen = kotlin.math.sqrt((dirX * dirX + dirZ * dirZ).toDouble()).toFloat().coerceAtLeast(0.001f)
                 val dot = (dirX / dirLen) * facingNormX + (dirZ / dirLen) * facingNormZ
                 if (dot >= 0f) {
-                    val dmgApplied = (damage - m.defense).coerceAtLeast(1)
+                    val dmgApplied = combatEngine.damagePlayerToMonster(player, m)
                     m.hp -= dmgApplied
                     knockback(m, player.position.x, player.position.z, world)
                     if (m.hp <= 0) {
@@ -184,19 +185,19 @@ class GameService(
                 if (moved) {
                     events.add(GameEvent.MonsterMove(monster))
                 }
-                playerRepository.findAll().forEach { p ->
-                    if (!p.isDead() && !worldService.isInSafeZone(p.mapId, p.position) && distance(monster.x, monster.z, p.position.x, p.position.z) <= world.attackRadius) {
-                        val dmgResult = lifeService.applyDamage(p.id, monster.attack, p.stats.defense)
-                        dmgResult?.let { res ->
-                            if (res.died) {
-                                val death = deathService.handlePlayerDeath(p.id)
-                                death?.let { d ->
-                                    events.add(GameEvent.PlayerDead(d.player, d.xpLost))
-                                }
-                            } else {
-                                events.add(GameEvent.PlayerUpdate(res.player))
-                            }
+            }
+            playerRepository.findAll().forEach { p ->
+                if (!p.isDead() && !worldService.isInSafeZone(p.mapId, p.position) && distance(monster.x, monster.z, p.position.x, p.position.z) <= world.attackRadius) {
+                    val damage = combatEngine.damageMonsterToPlayer(monster, p)
+                    val updated = p.applyDamage(damage)
+                    val saved = playerRepository.save(updated)
+                    if (saved.isDead()) {
+                        val death = deathService.handlePlayerDeath(saved.id)
+                        death?.let { d ->
+                            events.add(GameEvent.PlayerDead(d.player, d.xpLost))
                         }
+                    } else {
+                        events.add(GameEvent.PlayerUpdate(saved))
                     }
                 }
             }
@@ -223,19 +224,23 @@ class GameService(
         val currentMap = worldService.currentMap()
         val spawnPoints = currentMap.spawnPoints
         if (spawnPoints.isEmpty()) return null
-        val chosen = spawnPoints[rand.nextInt(spawnPoints.size)]
+        val avgPlayerLevel = playerRepository.findAll().map { it.level }.takeIf { it.isNotEmpty() }?.average() ?: 1.0
+        val candidates = spawnPoints.filter { avgPlayerLevel >= it.minLevel && avgPlayerLevel <= it.maxLevel }
+        val chosen = (if (candidates.isNotEmpty()) candidates else spawnPoints)[rand.nextInt((if (candidates.isNotEmpty()) candidates else spawnPoints).size)]
         val pos = worldService.randomSpawnNear(chosen)
         val spawnPos = confineMonsterToWild(pos.x, pos.z, world)
-        val template = pickTemplate()
+        val definition = enemyDefinitionProvider.find(chosen.enemyType) ?: enemyDefinitionProvider.all().first()
+        val scaledStats = scaleStats(definition, avgPlayerLevel.toInt())
         val monster = Monster(
             id = monsterIdGen.getAndIncrement(),
-            name = template.displayName,
-            hp = template.maxHp,
-            maxHp = template.maxHp,
-            attack = template.attack,
-            defense = template.defense,
-            xpReward = template.xpReward,
-            moveSpeed = template.moveSpeed,
+            name = definition.displayName,
+            type = definition.type,
+            hp = scaledStats.maxHp,
+            maxHp = scaledStats.maxHp,
+            attack = scaledStats.attack,
+            defense = scaledStats.defense,
+            xpReward = scaledStats.xpReward,
+            moveSpeed = scaledStats.moveSpeed,
             x = spawnPos.first,
             z = spawnPos.second,
             spawnX = spawnPos.first,
@@ -252,17 +257,6 @@ class GameService(
         return MoveState(target.first, target.second, timer)
     }
 
-    private fun pickTemplate(): MonsterTemplate {
-        val templates = monsterTemplateProvider.all()
-        val totalWeight = templates.sumOf { it.weight }
-        var roll = rand.nextInt(totalWeight)
-        templates.forEach { t ->
-            roll -= t.weight
-            if (roll < 0) return t
-        }
-        return templates.first()
-    }
-
     private fun randomWildPosition(world: WorldState): Pair<Float, Float> {
         val currentMap = worldService.currentMap()
         val radius = rand.nextDouble(world.wildRadiusMin.toDouble(), world.wildRadiusMax.toDouble()).toFloat()
@@ -271,6 +265,19 @@ class GameService(
         val z = (sin(angle) * radius).toFloat()
         val clamped = Position(x, z).clamp(currentMap.limitX, currentMap.limitZ)
         return Pair(clamped.x, clamped.z)
+    }
+
+    private fun scaleStats(definition: EnemyDefinition, playerLevel: Int): EnemyStats {
+        val base = definition.baseStats
+        val levelDelta = (playerLevel - definition.minLevel).coerceAtLeast(0)
+        val scale = 1f + levelDelta * 0.05f
+        return EnemyStats(
+            maxHp = (base.maxHp * scale).toInt(),
+            attack = (base.attack * scale).toInt(),
+            defense = (base.defense * scale).toInt(),
+            moveSpeed = base.moveSpeed,
+            xpReward = (base.xpReward * scale).toInt().coerceAtLeast(base.xpReward)
+        )
     }
 
     private fun confineMonsterToWild(x: Float, z: Float, world: WorldState): Pair<Float, Float> {
